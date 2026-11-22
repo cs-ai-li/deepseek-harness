@@ -207,13 +207,20 @@ interface RuntimeResources {
 
 function runtimeResources(): RuntimeResources {
   const development = !app.isPackaged
-  const node = process.execPath
+  const node = process.platform === 'linux'
+    ? join(development ? developmentPrimaryRuntime() : join(process.resourcesPath, 'runtime', 'primary-runtime'),
+      'dependencies', 'node', 'bin', 'node')
+    : process.execPath
   const nodeBin = development ? join(app.getAppPath(), 'scripts', 'node-bin') : join(process.resourcesPath, 'runtime', 'bin')
   const pnpm = (development ? process.env.DSH_DESKTOP_PNPM_ENTRY : undefined)
     ?? (development ? join(app.getAppPath(), 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
       : join(process.resourcesPath, 'runtime', 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs'))
   const dsh = (development ? process.env.DSH_DESKTOP_DSH_DIR : undefined)
-    ?? (development ? join(app.getAppPath(), '.desktop-build', 'development', 'project') : join(app.getAppPath(), 'dsh'))
+    ?? (development
+      ? join(app.getAppPath(), '.desktop-build', 'development', 'project')
+      : process.platform === 'linux'
+        ? join(process.resourcesPath, 'dsh')
+        : join(app.getAppPath(), 'dsh'))
   return { node, nodeBin, pnpm, dsh }
 }
 
@@ -261,6 +268,10 @@ function platformLoginUrl(authorizeUrl: string): string {
   return url.href
 }
 
+function desktopApplicationIconPath(): string {
+  return app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'resources', 'icon-windows.png')
+}
+
 function createWindow(preload: string, show = false, primary = false): BrowserWindow {
   const window = new BrowserWindow({
     width: 1280,
@@ -268,6 +279,10 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
     minWidth: 520,
     minHeight: 600,
     show,
+    ...(process.platform === 'linux' ? {
+      icon: desktopApplicationIconPath(),
+      ...(primary ? { backgroundColor: chromeFallbackFill() } : {}),
+    } : {}),
     ...(process.platform === 'win32' && primary ? {
       backgroundColor: chromeFallbackFill(),
       titleBarStyle: 'hidden' as const,
@@ -310,7 +325,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
     // current state so a fullscreen reload does not fall back to windowed CSS.
     window.webContents.on('did-finish-load', sendFullscreen)
   }
-  if (process.platform === 'win32' && primary) {
+  if ((process.platform === 'win32' || process.platform === 'linux') && primary) {
     const updateBackground = (): void => {
       if (!window.isDestroyed()) window.setBackgroundColor(chromeFallbackFill())
     }
@@ -360,7 +375,7 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
       const messages = currentDesktopLocale().messages
       Menu.buildFromTemplate(items.map(item => ({
         ...item,
-        ...(process.platform === 'win32' && item.role !== undefined && item.role in messages
+        ...(process.platform !== 'darwin' && item.role !== undefined && item.role in messages
           ? { label: messages[item.role as keyof typeof messages] } : {}),
         accelerator: '',
       }))).popup({ window })
@@ -479,7 +494,11 @@ async function main(): Promise<void> {
   const commandManager = new DesktopCommandManager({
     resources: process.resourcesPath,
     isPackaged: app.isPackaged,
-    isInstalledLocation: () => process.platform !== 'darwin' || app.isInApplicationsFolder(),
+    isInstalledLocation: () => process.platform === 'darwin'
+      ? app.isInApplicationsFolder()
+      : process.platform === 'linux'
+        ? process.env.APPIMAGE === undefined && !process.resourcesPath.startsWith('/tmp/')
+        : true,
     isInstalling: () => updateState.phase === 'installing',
     isQuitting,
     messages: () => currentDesktopLocale().messages,
@@ -1161,8 +1180,7 @@ async function main(): Promise<void> {
     updates.dispose()
   })
 
-  const applicationIconPath = development ? join(app.getAppPath(), 'resources', 'icon-windows.png')
-    : join(process.resourcesPath, 'icon.png')
+  const applicationIconPath = desktopApplicationIconPath()
   app.setAboutPanelOptions({
     applicationName: 'DeepSeek Harness',
     applicationVersion: app.getVersion(),
@@ -1218,7 +1236,7 @@ async function main(): Promise<void> {
       enteredWorkspace && !isMandatory(), () => { focusPrimaryWindow() }),
     { type: 'separator' },
     { label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } },
-    ...process.platform === 'darwin' || process.platform === 'win32'
+    ...process.platform === 'darwin' || process.platform === 'win32' || process.platform === 'linux'
       ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }] : [],
     { type: 'separator' },
     ...development ? [
@@ -1233,7 +1251,7 @@ async function main(): Promise<void> {
     { type: 'separator' },
     ...hideCommands,
     { role: 'quit', ...(darwin ? { label: currentDesktopLocale().messages.quitApplication }
-      : process.platform === 'win32' ? { label: currentDesktopLocale().messages.exitApplication } : {}) },
+      : process.platform === 'win32' || process.platform === 'linux' ? { label: currentDesktopLocale().messages.exitApplication } : {}) },
   ]
   const devToolsF12Shortcut: MenuItemConstructorOptions = { role: 'toggleDevTools', visible: false, accelerator: 'F12' }
   const windowsDevToolsShortcuts: MenuItemConstructorOptions[] = [
@@ -1249,15 +1267,17 @@ async function main(): Promise<void> {
     tray?.relabel()
   }
   refreshApplicationMenu()
-  const trayIconPath = development ? join(app.getAppPath(), 'resources', 'tray-windows.ico') : join(process.resourcesPath, 'tray.ico')
-  if (process.platform === 'win32') {
+  const trayIconPath = process.platform === 'win32'
+    ? (development ? join(app.getAppPath(), 'resources', 'tray-windows.ico') : join(process.resourcesPath, 'tray.ico'))
+    : applicationIconPath
+  if (process.platform === 'win32' || process.platform === 'linux') {
     // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
     try {
       tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
         open: () => { focusPrimaryWindow() }, quit: () => { app.quit() } })
     } catch (error) { console.warn('desktop tray: unavailable', error) }
   }
-  const backgroundNotice = process.platform === 'win32'
+  const backgroundNotice = process.platform === 'win32' || process.platform === 'linux'
     ? new DesktopBackgroundNotice({ markerPath: join(app.getPath('userData'), 'background-close-confirmed'),
       locale: () => locale, show: ordinaryMessageBox, focus: () => { updateDialog.focus() } })
     : undefined
@@ -1381,7 +1401,7 @@ async function main(): Promise<void> {
     const window = mainWindow ?? createMainWindow()
     await navigateMain(applicationUrl)
     if (isQuitting() || recovery.active || window.isDestroyed()) return
-    if (process.platform === 'win32') window.setBackgroundColor(chromeFallbackFill())
+    if (process.platform === 'win32' || process.platform === 'linux') window.setBackgroundColor(chromeFallbackFill())
     if (activate) window.show()
     else window.showInactive()
     const wasInWorkspace = enteredWorkspace
