@@ -58,7 +58,12 @@ let disposeActiveHandlers: (() => void) | undefined
  */
 export async function openWelcomeWindow(locale: DesktopLocale, operations: WelcomeOperations): Promise<BrowserWindow> {
   const options = welcomeWindowOptions(process.platform, locale)
-  const window = new BrowserWindow(options)
+  const window = new BrowserWindow({
+    ...options,
+    ...(process.platform === 'linux' ? {
+      icon: app.isPackaged ? join(process.resourcesPath, 'icon.png') : join(app.getAppPath(), 'resources', 'icon-windows.png'),
+    } : {}),
+  })
   disposeActiveHandlers?.()
   let active = true
   const disposeHandlers = (): void => {
